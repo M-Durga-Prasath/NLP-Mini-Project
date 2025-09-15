@@ -1,15 +1,37 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import pytesseract
-from PIL import Image
-import pdfplumber
 import os
-import requests  # to call your model API
+import sys
+from PIL import Image
+import pytesseract
+import pdfplumber
+
+# ---- Import abstractive model ----
+from transformers import pipeline
+abstractive_summarizer = pipeline(
+    "summarization",
+    model="./IndicBART-XLSum",
+    tokenizer="./IndicBART-XLSum",
+    device=0,
+    use_fast=False
+)
+
+
+# ---- Import extractive model ----
+from sumy.parsers.plaintext import PlaintextParser
+from sumy.nlp.tokenizers import Tokenizer
+from sumy.summarizers.text_rank import TextRankSummarizer
+
+def extractive_summary(text, sentence_count=3):
+    parser = PlaintextParser.from_string(text, Tokenizer("english"))  # works for Tamil too
+    summarizer = TextRankSummarizer()
+    summary = summarizer(parser.document, sentence_count)
+    return " ".join(str(s) for s in summary)
+
 
 app = Flask(__name__)
-CORS(app)  # allow all origins for development
+CORS(app)
 
-# Flask route
 @app.route("/summarize", methods=["POST"])
 def summarize():
     text_input = request.form.get("text")
@@ -20,10 +42,10 @@ def summarize():
     if text_input and text_input.strip():
         extracted_text = text_input.strip()
 
-    # Case 2: File upload (OCR / PDF)
+    # Case 2: File upload
     elif file:
-        filepath = os.path.join("uploads", file.filename)
         os.makedirs("uploads", exist_ok=True)
+        filepath = os.path.join("uploads", file.filename)
         file.save(filepath)
 
         if file.filename.lower().endswith(".pdf"):
@@ -41,17 +63,25 @@ def summarize():
     if not extracted_text.strip():
         return jsonify({"error": "No text extracted"}), 400
 
-    # ---- Call the actual model backend API ----
     try:
-        # Replace with your model backend URL
-        MODEL_API_URL = "http://127.0.0.1:5001/summarize"  
-        response = requests.post(MODEL_API_URL, json={"text": extracted_text})
-        response_data = response.json()
-        summary = response_data.get("summary", "⚠️ Model did not return a summary.")
-    except Exception as e:
-        return jsonify({"error": f"Failed to reach model backend: {str(e)}"}), 500
+        # ---- Abstractive summary ----
+        abs_summary = abstractive_summarizer(
+            extracted_text,
+            max_length=100,
+            min_length=30,
+            do_sample=False
+        )[0]['summary_text']
 
-    return jsonify({"summary": summary})
+        # ---- Extractive summary ----
+        ext_summary = extractive_summary(extracted_text, sentence_count=3)
+
+    except Exception as e:
+        return jsonify({"error": f"Failed to generate summary: {str(e)}"}), 500
+
+    return jsonify({
+        "extractive_summary": abs_summary,
+        "abstractive_summary": ext_summary
+    })
 
 
 if __name__ == "__main__":
